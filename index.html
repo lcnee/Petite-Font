@@ -450,8 +450,8 @@
       <label class="field"><span data-vi="Số ô / trang" data-en="Cells / page">Số ô / trang</span>
         <select id="gridDensity">
           <option value="12" data-vi="12 ô (3×4)" data-en="12 cells (3×4)">12 ô (3×4)</option>
-          <option value="16" selected data-vi="16 ô (4×4)" data-en="16 cells (4×4)">16 ô (4×4)</option>
-          <option value="20" data-vi="20 ô (4×5)" data-en="20 cells (4×5)">20 ô (4×5)</option>
+          <option value="16" data-vi="16 ô (4×4)" data-en="16 cells (4×4)">16 ô (4×4)</option>
+          <option value="20" selected data-vi="20 ô (4×5)" data-en="20 cells (4×5)">20 ô (4×5)</option>
         </select>
       </label>
       <label class="field"><span data-vi="Guideline" data-en="Guideline">Guideline</span>
@@ -460,7 +460,14 @@
           <option value="0" data-vi="Không, chỉ viền ô" data-en="No, cell outline only">Không, chỉ viền ô</option>
         </select>
       </label>
+      <label class="field"><span data-vi="Chữ mờ làm guide" data-en="Ghost character guide">Chữ mờ làm guide</span>
+        <select id="ghostCharToggle">
+          <option value="0" selected data-vi="Không" data-en="Off">Không</option>
+          <option value="1" data-vi="Có (in mờ ký tự trong ô)" data-en="On (print faint character in cell)">Có (in mờ ký tự trong ô)</option>
+        </select>
+      </label>
     </div>
+    <div class="hint" id="ghostSlowNote" style="display:none;margin-top:-4px;margin-bottom:10px;" data-vi="⏳ Ghost sẽ cần thời gian lâu hơn để generate PDF, vui lòng đợi một chút thôi nha. Các ô dot generate tự động sẽ chưa chính xác, vui lòng chỉ tham khảo." data-en="⏳ Ghost mode takes a bit longer to generate the PDF, please wait a moment. Auto-generated dot cells may not be fully accurate — please use them as a reference only.">⏳ Ghost sẽ cần thời gian lâu hơn để generate PDF, vui lòng đợi một chút thôi nha. Các ô dot generate tự động sẽ chưa chính xác, vui lòng chỉ tham khảo.</div>
 
     <div class="stat-row" id="charsetStats"></div>
     <div class="charset-grid" id="charsetGrid"></div>
@@ -662,8 +669,10 @@ const CHARSETS = {
 const STATE = {
   step: 1,
   charset: VN_CHARSET,
-  gridDensity: 16,
+  lang: 'vi',
+  gridDensity: 20,
   guideline: true,
+  ghostChar: false,
   template: null,     // { pageLayout, cellsPerPage, totalPages, cellPositions }
   glyphs: {},          // char -> { imageData(dataURL), path(opentype path or null), ok(bool), bbox }
   fontBuilt: null,
@@ -748,6 +757,7 @@ function renderCharsetPreview(){
 }
 
 function applyLang(lang){
+  STATE.lang = lang;
   STATE.charset = CHARSETS[lang] || VN_CHARSET;
   renderCharsetPreview();
 }
@@ -760,6 +770,10 @@ document.getElementById('gridDensity').addEventListener('change', e=>{
 });
 document.getElementById('guidelineToggle').addEventListener('change', e=>{
   STATE.guideline = e.target.value === '1';
+});
+document.getElementById('ghostCharToggle').addEventListener('change', e=>{
+  STATE.ghostChar = e.target.value === '1';
+  document.getElementById('ghostSlowNote').style.display = STATE.ghostChar ? 'block' : 'none';
 });
 
 renderCharsetPreview();
@@ -819,11 +833,180 @@ function buildTemplatePlan(charset, density){
   return { geo, perPage, totalPages, pages };
 }
 
-function drawGuidelineInCell(doc, cell, guideline){
+// Renders text via <canvas> (so it uses real browser fonts / full Unicode,
+// unlike jsPDF's built-in helvetica which has no Vietnamese glyphs) and
+// embeds it into the PDF as a PNG, horizontally centered at cx_mm with its
+// baseline aligned to baseline_mm.
+// Converts a filled glyph (rendered on an offscreen canvas) into a ring of
+// evenly-spaced dots tracing its outline, similar to a "connect-the-dots"
+// tracing sheet. Draws directly onto ctx.
+function stampDottedGlyph(ctx, wPx, hPx, text, fontPx, family, weight, color, dotRadiusPx, spacingPx){
+  // 1) render the glyph solid (black) offscreen so we can read its alpha mask.
+  // Faint fill threshold stays generous (>120) so accented Vietnamese marks
+  // (dấu sắc/huyền/nặng/hỏi/ngã, ơ/ư horns, etc.) — which are thin, separate
+  // strokes — are fully captured and not lost.
+  const off = document.createElement('canvas');
+  off.width = wPx; off.height = hPx;
+  const octx = off.getContext('2d');
+  octx.font = `${weight} ${fontPx}px ${family}`;
+  octx.fillStyle = '#000';
+  octx.textBaseline = 'alphabetic';
+  octx.textAlign = 'left';
+  octx.fillText(text, 2, Math.ceil(fontPx*1.05));
+
+  const img = octx.getImageData(0, 0, wPx, hPx);
+  // mask[y][x] = 1 if filled, 0 if empty (mutable copy for thinning)
+  let mask = [];
+  for(let y=0; y<hPx; y++){
+    const row = new Uint8Array(wPx);
+    for(let x=0; x<wPx; x++){
+      row[x] = img.data[(y*wPx+x)*4+3] > 120 ? 1 : 0;
+    }
+    mask.push(row);
+  }
+
+  // 2) Zhang-Suen thinning: erodes the filled glyph down to a 1px-wide
+  // skeleton (medial axis) so the dots trace a single centerline path,
+  // like an actual pen stroke, instead of tracing both edges of each letter.
+  const at = (m,x,y)=> (x<0||y<0||x>=wPx||y>=hPx) ? 0 : m[y][x];
+  let changed = true;
+  let guard = 0;
+  while(changed && guard < 60){
+    changed = false; guard++;
+    for(const step of [0,1]){
+      const toClear = [];
+      for(let y=0; y<hPx; y++){
+        for(let x=0; x<wPx; x++){
+          if(!mask[y][x]) continue;
+          const p2=at(mask,x,y-1), p3=at(mask,x+1,y-1), p4=at(mask,x+1,y),
+                p5=at(mask,x+1,y+1), p6=at(mask,x,y+1), p7=at(mask,x-1,y+1),
+                p8=at(mask,x-1,y), p9=at(mask,x-1,y-1);
+          const neighbors = [p2,p3,p4,p5,p6,p7,p8,p9];
+          const B = neighbors.reduce((a,b)=>a+b,0);
+          if(B < 2 || B > 6) continue;
+          let A = 0;
+          for(let i=0;i<8;i++){
+            if(neighbors[i]===0 && neighbors[(i+1)%8]===1) A++;
+          }
+          if(A !== 1) continue;
+          if(step===0){
+            if(p2*p4*p6 !== 0) continue;
+            if(p4*p6*p8 !== 0) continue;
+          } else {
+            if(p2*p4*p8 !== 0) continue;
+            if(p2*p6*p8 !== 0) continue;
+          }
+          toClear.push([x,y]);
+        }
+      }
+      if(toClear.length){
+        changed = true;
+        for(const [x,y] of toClear) mask[y][x] = 0;
+      }
+    }
+  }
+
+  const skeleton = [];
+  for(let y=0; y<hPx; y++){
+    for(let x=0; x<wPx; x++){
+      if(mask[y][x]) skeleton.push([x,y]);
+    }
+  }
+
+  // 3) greedily pick points spaced at least `spacingPx` apart along the
+  // skeleton so dots look evenly distributed, like beads on a single string
+  const picked = [];
+  for(const [x,y] of skeleton){
+    let ok = true;
+    for(const [px,py] of picked){
+      const dx=x-px, dy=y-py;
+      if(dx*dx+dy*dy < spacingPx*spacingPx){ ok=false; break; }
+    }
+    if(ok) picked.push([x,y]);
+  }
+
+  // 4) stamp a dot at each picked point
+  ctx.fillStyle = `rgb(${color[0]},${color[1]},${color[2]})`;
+  for(const [x,y] of picked){
+    ctx.beginPath();
+    ctx.arc(x, y, dotRadiusPx, 0, Math.PI*2);
+    ctx.fill();
+  }
+}
+
+function drawUnicodeText(doc, text, cx_mm, baseline_mm, opts){
+  opts = opts || {};
+  const fontMM   = opts.fontMM || 3;
+  const color    = opts.color || [0,0,0];
+  const bold     = !!opts.bold;
+  const family   = opts.fontFamily || 'Arial, "Segoe UI", "Helvetica Neue", sans-serif';
+  const pxPerMm  = 7; // render resolution — lowered to keep exported PDF file size small
+  const fontPx   = Math.max(6, Math.round(fontMM*pxPerMm));
+  const weight   = bold ? '700' : '400';
+  const dotted   = !!opts.dotted;
+
+  const measure = document.createElement('canvas').getContext('2d');
+  measure.font = `${weight} ${fontPx}px ${family}`;
+  const wPx = Math.max(1, Math.ceil(measure.measureText(text).width) + 4);
+  const ascentPx  = Math.ceil(fontPx*1.05);
+  const descentPx = Math.ceil(fontPx*0.35);
+  const hPx = ascentPx + descentPx;
+
+  const canvas = document.createElement('canvas');
+  canvas.width = wPx; canvas.height = hPx;
+  const ctx = canvas.getContext('2d');
+
+  if(dotted){
+    // spacing/radius scale with font size so bigger cells get proportionally
+    // spaced dots (roughly matches a "tracing sheet" look)
+    const dotRadiusPx = Math.max(0.6, fontPx*0.018);
+    const spacingPx   = Math.max(2.5, fontPx*0.07);
+    stampDottedGlyph(ctx, wPx, hPx, text, fontPx, family, weight, color, dotRadiusPx, spacingPx);
+  } else {
+    ctx.font = `${weight} ${fontPx}px ${family}`;
+    ctx.fillStyle = `rgb(${color[0]},${color[1]},${color[2]})`;
+    ctx.textBaseline = 'alphabetic';
+    ctx.textAlign = 'left';
+    ctx.fillText(text, 2, ascentPx);
+  }
+
+  const wMM = wPx/pxPerMm, hMM = hPx/pxPerMm;
+  const x = cx_mm - wMM/2;
+  const y = baseline_mm - ascentPx/pxPerMm;
+  doc.addImage(canvas.toDataURL('image/png'), 'PNG', x, y, wMM, hMM);
+}
+
+// Some characters (Thai vowel/tone marks, Vietnamese standalone combining
+// marks, etc.) are Unicode "combining marks" — they render as nothing (or
+// a near-invisible sliver) unless attached to a base letter. For display
+// only (label under the cell + the ghost trace), prefix them with a dotted
+// circle (U+25CC) so they're actually visible to write over. This does NOT
+// change the underlying character being taught/exported — only how it's
+// drawn on the template.
+function displayChar(ch){
+  if(!ch) return ch;
+  try{
+    if(/\p{Mn}/u.test(ch)) return '\u25CC' + ch;
+  }catch(e){ /* older engines without \p{Mn} support: skip */ }
+  return ch;
+}
+
+function drawGuidelineInCell(doc, cell, guideline, ghostChar, ch){
   // cell box
   doc.setDrawColor(210,200,185);
   doc.setLineWidth(0.3);
   doc.rect(cell.x, cell.y, cell.w, cell.h);
+
+  // faint dotted-outline ghost character to trace over (drawn under the
+  // guidelines). Faint color keeps it distinguishable from real ink when
+  // the traced sheet is later scanned and thresholded into a font.
+  if(ghostChar && ch && ch !== ' '){
+    drawUnicodeText(doc, displayChar(ch), cell.x + cell.w/2, cell.y + cell.h*0.72, {
+      fontMM: cell.h*0.72,
+      color: [210,206,199],
+      dotted: true,
+    });
+  }
 
   if(!guideline) return;
 
@@ -852,6 +1035,7 @@ function generateTemplatePDF(){
   STATE.template = {
     density: STATE.gridDensity,
     guideline: STATE.guideline,
+    ghostChar: STATE.ghostChar,
     geo: plan.geo,
     perPage: plan.perPage,
     totalPages: plan.totalPages,
@@ -866,22 +1050,22 @@ function generateTemplatePDF(){
     doc.setFont('helvetica','bold');
     doc.setFontSize(11);
     doc.setTextColor(40,35,30);
-    doc.text('Petite Font Creator — Template viết tay (Tiếng Việt)', MARGIN, 9);
+    doc.text('Petite Font Creator - Handwriting Template', MARGIN, 9);
     doc.setFont('helvetica','normal');
     doc.setFontSize(8);
     doc.setTextColor(140,130,115);
-    doc.text(`Trang ${pIdx+1}/${plan.totalPages} · Viết ký tự vào đúng ô tương ứng với nhãn bên dưới ô`, MARGIN, 13);
+    doc.text(`Page ${pIdx+1}/${plan.totalPages} - Write each character in its matching cell (label below the cell)`, MARGIN, 13);
 
     pageChars.forEach((ch, i)=>{
       const cell = plan.geo.cells[i];
-      drawGuidelineInCell(doc, cell, STATE.guideline);
+      drawGuidelineInCell(doc, cell, STATE.guideline, STATE.ghostChar, ch);
 
       // label below the cell — small, outside the drawable area
-      doc.setFont('helvetica','normal');
-      doc.setFontSize(8);
-      doc.setTextColor(120,110,95);
-      const label = ch === ' ' ? '(space)' : ch;
-      doc.text(label, cell.x + cell.w/2, cell.y + cell.h + 3.2, { align:'center' });
+      const label = ch === ' ' ? '(space)' : displayChar(ch);
+      drawUnicodeText(doc, label, cell.x + cell.w/2, cell.y + cell.h + 3.2, {
+        fontMM: 2.6,
+        color: [120,110,95],
+      });
 
       // tiny corner index for debugging/manual reorder safety
       doc.setFontSize(6);
@@ -893,10 +1077,13 @@ function generateTemplatePDF(){
     // footer
     doc.setFontSize(7.5);
     doc.setTextColor(170,162,148);
-    doc.text(`Petite Font Creator · không xoá số thứ tự góc ô, dùng để đối chiếu khi quét lại`, MARGIN, PAGE_H-5);
+    doc.text(`Petite Font Creator - keep the corner number, it's used to match cells when re-scanning`, MARGIN, PAGE_H-5);
   });
 
-  doc.save('petite-font-creator-template-vi.pdf');
+  const LANG_CODE = { vi:'VN', en:'EN', th:'TH', ko:'KR' };
+  const langTag = LANG_CODE[STATE.lang] || 'VN';
+  const ghostTag = STATE.ghostChar ? '-Ghost' : '';
+  doc.save(`petite-font-${langTag}-${STATE.gridDensity}${ghostTag}.pdf`);
   statusEl.textContent = t(
     `✅ Đã tạo ${plan.totalPages} trang, ${STATE.charset.length} ký tự. Sau khi vẽ xong, qua Bước 2 để nộp lại.`,
     `✅ Generated ${plan.totalPages} page(s), ${STATE.charset.length} characters. Once you're done writing, go to Step 2 to upload it back.`
