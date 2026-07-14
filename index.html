@@ -2263,13 +2263,23 @@ document.addEventListener('DOMContentLoaded',()=>{}, false);
    ============================================================ */
 // Korean Jamo: 19 initial consonants + 21 vowels + 27 final consonants (67 unique jamo)
 // Unicode block U+1100–U+11FF (Hangul Jamo)
+// Korean charset — uses HANGUL COMPATIBILITY JAMO (U+3131–U+3163), NOT the
+// conjoining jamo block (U+1100–U+11FF). Conjoining jamo are designed to be
+// algorithmically combined into syllable blocks (한 = ᄒ+ᅡ+ᆫ) and most fonts
+// only ship "isolated presentation forms" for them — small, oddly-positioned
+// glyphs (offset top/bottom) meant as a fallback, not a real solo letter.
+// Compatibility Jamo is the block made specifically for showing a Korean
+// letter by itself (used in dictionaries, keyboards, IMEs) — it renders as a
+// normal, full-size, centered glyph like any other single character.
 const KO_JAMO_CHARSET = [
-  // Choseong (initial consonants) U+1100–U+1112
-  'ᄀ','ᄁ','ᄂ','ᄃ','ᄄ','ᄅ','ᄆ','ᄇ','ᄈ','ᄉ','ᄊ','ᄋ','ᄌ','ᄍ','ᄎ','ᄏ','ᄐ','ᄑ','ᄒ',
-  // Jungseong (vowels) U+1161–U+1175
-  'ᅡ','ᅢ','ᅣ','ᅤ','ᅥ','ᅦ','ᅧ','ᅨ','ᅩ','ᅪ','ᅫ','ᅬ','ᅭ','ᅮ','ᅯ','ᅰ','ᅱ','ᅲ','ᅳ','ᅴ','ᅵ',
-  // Jongseong (final consonants) U+11A8–U+11C2
-  'ᆨ','ᆩ','ᆪ','ᆫ','ᆬ','ᆭ','ᆮ','ᆯ','ᆰ','ᆱ','ᆲ','ᆳ','ᆴ','ᆵ','ᆶ','ᆷ','ᆸ','ᆹ','ᆺ','ᆻ','ᆼ','ᆽ','ᆾ','ᆿ','ᇀ','ᇁ','ᇂ',
+  // Consonants (19) — same shapes are reused whether the letter is acting as
+  // an initial or final in a real syllable, so we only need one entry each.
+  'ㄱ','ㄲ','ㄴ','ㄷ','ㄸ','ㄹ','ㅁ','ㅂ','ㅃ','ㅅ','ㅆ','ㅇ','ㅈ','ㅉ','ㅊ','ㅋ','ㅌ','ㅍ','ㅎ',
+  // Vowels (21)
+  'ㅏ','ㅐ','ㅑ','ㅒ','ㅓ','ㅔ','ㅕ','ㅖ','ㅗ','ㅘ','ㅙ','ㅚ','ㅛ','ㅜ','ㅝ','ㅞ','ㅟ','ㅠ','ㅡ','ㅢ','ㅣ',
+  // Composite final-only consonant clusters (11) — shapes that only ever
+  // appear as a batchim (final), so they're not covered by the list above.
+  'ㄳ','ㄵ','ㄶ','ㄺ','ㄻ','ㄼ','ㄽ','ㄾ','ㄿ','ㅀ','ㅄ',
   // Digits and basic punctuation (shared)
   '0','1','2','3','4','5','6','7','8','9',
   '.', ',', '!', '?', ':', ';', "'", '"', '-', '(', ')',
@@ -2296,7 +2306,7 @@ CHARSETS['th'] = TH_CHARSET;
   const sel=document.getElementById(id);
   if(!sel) return;
   if(!sel.querySelector('[value="ko"]')){
-    const o1=document.createElement('option'); o1.value='ko'; o1.textContent='한국어 (Hangul Jamo ~67)'; sel.appendChild(o1);
+    const o1=document.createElement('option'); o1.value='ko'; o1.textContent='한국어 (Hangul Jamo ~72)'; sel.appendChild(o1);
   }
   if(!sel.querySelector('[value="th"]')){
     const o2=document.createElement('option'); o2.value='th'; o2.textContent='ภาษาไทย (Thai ~87)'; sel.appendChild(o2);
