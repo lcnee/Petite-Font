@@ -387,6 +387,91 @@
 
   ::-webkit-scrollbar{width:6px;height:6px;}
   ::-webkit-scrollbar-thumb{background:var(--pink);border-radius:3px;}
+
+  /* ============================================================
+     MOBILE LAYOUT — only kicks in below 780px, desktop rules above
+     are completely untouched. The desktop layout is a 4-column
+     flex row (left info | rings | right content | sidebar tabs)
+     with two fixed-width columns (220px + 92px) that simply don't
+     fit on a phone screen. On mobile we stack everything vertically
+     and turn the sidebar tab list into a horizontal scroll strip.
+     ============================================================ */
+  @media (max-width: 780px){
+    #app{ padding:8px; }
+    .cy-frame{ border-radius:14px; }
+    .cy-header{ padding:10px 12px; gap:8px; }
+    .cy-header .cy-title{ font-size:15px; }
+    .cy-header .cy-url{ display:none; } /* decorative, saves space */
+
+    .cy-body{
+      flex-direction:column;
+      min-height:0;
+    }
+
+    /* Left info pane: full width, no longer fixed 220px */
+    .cy-left{
+      width:100%;
+      padding:12px;
+      order:2; /* show after the sidebar tabs so users hit "what do I do" quickly, tweak if needed */
+    }
+
+    /* Ring binder decoration: purely visual — drop it on mobile to
+       reclaim space instead of squeezing it awkwardly */
+    .cy-rings{ display:none; }
+
+    .cy-right{
+      padding:12px;
+      border-left:none;
+      order:3;
+      min-width:0;
+    }
+
+    /* Sidebar tabs become a horizontally-scrollable strip pinned to
+       the top of the body, like a mobile app's segmented control,
+       instead of a squeezed 92px-wide vertical column. */
+    .cy-sidebar{
+      width:100%;
+      flex-direction:row;
+      align-items:center;
+      overflow-x:auto;
+      -webkit-overflow-scrolling:touch;
+      padding:10px 10px;
+      gap:8px;
+      border-left:none;
+      border-bottom:1px solid var(--blue-border);
+      order:1;
+    }
+    .cy-sidebar .home-btn{
+      width:44px;height:44px;font-size:18px;flex-shrink:0;margin-bottom:0;
+    }
+    .cy-nav-tab{
+      width:auto;min-height:44px;flex-shrink:0;
+      padding:8px 12px;font-size:11.5px;
+      flex-direction:row;gap:5px;white-space:nowrap;
+    }
+
+    /* Step nav list inside left pane: let buttons wrap/shrink nicely */
+    .left-step-btn{ font-size:12.5px; padding:9px 10px; }
+
+    /* Form rows: fields stack full-width instead of a tight flex-wrap
+       that can leave orphaned narrow controls */
+    .row{ gap:10px; }
+    label.field{ flex:1 1 140px; min-width:0; }
+    label.field select, label.field input{ width:100%; max-width:100%; }
+
+    /* Fixed-px inputs elsewhere in the markup — let them size to
+       their container on narrow screens */
+    #fontName, #quickPreviewInput{ width:100% !important; max-width:100%; }
+
+    .glyph-grid{ grid-template-columns:repeat(auto-fill,minmax(58px,1fr)); gap:6px; }
+
+    .editor-card{ padding:14px; max-height:92vh; overflow-y:auto; }
+    .preview-text{ font-size:20px; padding:10px; }
+
+    /* Any element wider than the viewport (e.g. canvases sized in JS)
+       shouldn't force horizontal scrolling of the whole page */
+    canvas{ max-width:100%; height:auto; }
+  }
 </style>
 </head>
 <body>
