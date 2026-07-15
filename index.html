@@ -632,7 +632,7 @@
       <label class="field">Letter spacing (units/em)
         <input type="number" id="letterSpacing" value="60" style="width:80px;">
       </label>
-      <span class="hint" style="margin:0;" data-vi="Khoảng cách giữa các ký tự khi build font. Bấm vào 1 ký tự bên dưới để sửa nét hoặc chỉnh lệch baseline riêng." data-en="Spacing between characters when the font is built. Click a character below to fix strokes or nudge its baseline.">Khoảng cách giữa các ký tự khi build font. Bấm vào 1 ký tự bên dưới để sửa nét hoặc chỉnh lệch baseline riêng.</span>
+      <span class="hint" style="margin:0;" data-vi="Khoảng cách giữa các ký tự khi build font. Lưu ý: cần bấm 'Build & preview font' ít nhất 1 lần trước — sau đó đổi số này sẽ tự cập nhật preview. Bấm vào 1 ký tự bên dưới để sửa nét hoặc chỉnh lệch baseline riêng." data-en="Spacing between characters when the font is built. Note: press 'Build & preview font' at least once first — after that, changing this number auto-updates the preview. Click a character below to fix strokes or nudge its baseline.">Khoảng cách giữa các ký tự khi build font. Lưu ý: cần bấm 'Build & preview font' ít nhất 1 lần trước — sau đó đổi số này sẽ tự cập nhật preview. Bấm vào 1 ký tự bên dưới để sửa nét hoặc chỉnh lệch baseline riêng.</span>
     </div>
 
     <div class="glyph-grid" id="glyphGrid"></div>
@@ -2067,7 +2067,15 @@ document.getElementById('previewInput').addEventListener('input', e=>{
 let letterSpacingDebounce = null;
 document.getElementById('letterSpacing').addEventListener('input', ()=>{
   const alreadyBuilt = document.getElementById('previewWrap').style.display !== 'none';
-  if(!alreadyBuilt) return; // nothing to refresh yet — first build still needs the button
+  if(!alreadyBuilt){
+    // Nothing built yet, so there's no preview/font to update in place —
+    // make that explicit instead of silently doing nothing, which looked
+    // like the field was broken/ignored.
+    document.getElementById('buildStatus').textContent = STATE.uiLang==='en'
+      ? 'Value saved — press "Build & preview font" below to apply it (nothing has been built yet).'
+      : 'Đã lưu giá trị — bấm "Build & preview font" bên dưới để áp dụng (chưa build font lần nào).';
+    return;
+  }
   clearTimeout(letterSpacingDebounce);
   document.getElementById('buildStatus').textContent = STATE.uiLang==='en'
     ? 'Letter spacing changed — refreshing preview…'
