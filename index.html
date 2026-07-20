@@ -597,9 +597,9 @@
     <div class="cy-section-title">02 · Upload & Detect</div>
 
     <div class="dropzone" id="dropzone">
-      <div class="big" data-vi="📤 Kéo thả PDF vào đây, hoặc bấm để chọn file" data-en="📤 Drag & drop your PDF here, or click to choose a file">📤 Kéo thả PDF vào đây, hoặc bấm để chọn file</div>
-      <div data-vi="Có thể chọn nhiều file PDF cùng lúc (nếu vẽ nhiều trang riêng)" data-en="You can select multiple PDF files at once (if pages were scanned separately)">Có thể chọn nhiều file PDF cùng lúc (nếu vẽ nhiều trang riêng)</div>
-      <input type="file" id="fileInput" accept="application/pdf" multiple style="display:none;">
+      <div class="big" data-vi="📤 Kéo thả PDF hoặc ảnh vào đây, hoặc bấm để chọn file" data-en="📤 Drag & drop your PDF or photos here, or click to choose files">📤 Kéo thả PDF hoặc ảnh vào đây, hoặc bấm để chọn file</div>
+      <div data-vi="Có thể chọn nhiều file PDF hoặc ảnh cùng lúc (mỗi ảnh = 1 trang, có thể chọn từ thư viện ảnh trên điện thoại)" data-en="You can select multiple PDF or image files at once (each image = 1 page; you can pick straight from your phone's photo library)">Có thể chọn nhiều file PDF hoặc ảnh cùng lúc (mỗi ảnh = 1 trang, có thể chọn từ thư viện ảnh trên điện thoại)</div>
+      <input type="file" id="fileInput" accept="application/pdf,image/*" multiple style="display:none;">
     </div>
 
     <div class="progress-wrap" id="detectProgressWrap" style="display:none;">
@@ -1257,42 +1257,82 @@ async function handleUploadedFiles(fileList){
     logDetect(t('⚠️ Chưa có template (Bước 1). Hãy tạo template trước.','⚠️ No template yet (Step 1). Please generate a template first.'));
     return;
   }
-  const files = Array.from(fileList).filter(f=>f.type==='application/pdf' || f.name.toLowerCase().endsWith('.pdf'));
+  const isPdf = f => f.type==='application/pdf' || f.name.toLowerCase().endsWith('.pdf');
+  const isImg = f => f.type.startsWith('image/') || /\.(jpe?g|png|heic|heif|webp|gif|bmp)$/i.test(f.name);
+  const files = Array.from(fileList).filter(f=> isPdf(f) || isImg(f));
   if(files.length===0){
-    logDetect(t('⚠️ Không tìm thấy file PDF hợp lệ.','⚠️ No valid PDF file found.'));
+    logDetect(t('⚠️ Không tìm thấy file PDF hoặc ảnh hợp lệ.','⚠️ No valid PDF or image file found.'));
     return;
   }
 
   document.getElementById('detectProgressWrap').style.display='block';
   const progBar = document.getElementById('detectProgressBar');
-  logDetect(t(`📥 Nhận ${files.length} file PDF, bắt đầu xử lý...`,`📥 Received ${files.length} PDF file(s), starting processing...`));
+  logDetect(t(`📥 Nhận ${files.length} file (PDF/ảnh), bắt đầu xử lý...`,`📥 Received ${files.length} file(s) (PDF/image), starting processing...`));
 
   // total expected pages across all files vs template totalPages (informational only)
   let processedPages = 0;
   let totalCharsCropped = 0;
 
-  for(const file of files){
-    const buf = await file.arrayBuffer();
-    const pdf = await pdfjsLib.getDocument({data: buf}).promise;
-    logDetect(`📄 ${file.name}: ${pdf.numPages} trang`);
+  // Trả về danh sách canvas (mỗi canvas = 1 "trang"), dùng chung cho cả PDF và ảnh thường.
+  async function getPageCanvases(file){
+    if(isPdf(file)){
+      const buf = await file.arrayBuffer();
+      const pdf = await pdfjsLib.getDocument({data: buf}).promise;
+      logDetect(`📄 ${file.name}: ${pdf.numPages} trang`);
+      const canvases = [];
+      for(let pNum=1; pNum<=pdf.numPages; pNum++){
+        const page = await pdf.getPage(pNum);
+        // pdf.js viewport units are points (1/72in). A4 width = 210mm ≈ 595.28pt.
+        // We want the rendered canvas to be `RENDER_SCALE` px per mm for a crisp trace.
+        const baseViewport = page.getViewport({scale:1});
+        const targetWidthPx = PAGE_W * RENDER_SCALE;          // desired canvas width in px
+        const scale = targetWidthPx / baseViewport.width;      // pdf.js scale factor (px per pt)
+        const vp = page.getViewport({scale});
 
-    for(let pNum=1; pNum<=pdf.numPages; pNum++){
-      const page = await pdf.getPage(pNum);
-
-      // pdf.js viewport units are points (1/72in). A4 width = 210mm ≈ 595.28pt.
-      // We want the rendered canvas to be `RENDER_SCALE` px per mm for a crisp trace.
-      const baseViewport = page.getViewport({scale:1});
-      const targetWidthPx = PAGE_W * RENDER_SCALE;          // desired canvas width in px
-      const scale = targetWidthPx / baseViewport.width;      // pdf.js scale factor (px per pt)
-      const vp = page.getViewport({scale});
-
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.round(vp.width);
+        canvas.height = Math.round(vp.height);
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0,0,canvas.width,canvas.height);
+        await page.render({canvasContext: ctx, viewport: vp}).promise;
+        canvases.push(canvas);
+      }
+      return canvases;
+    } else {
+      // Ảnh thường (chụp từ camera hoặc chọn từ thư viện ảnh) — coi như 1 trang duy nhất.
+      logDetect(`🖼️ ${file.name}: 1 ảnh (1 trang)`);
+      const bitmap = await createImageBitmap(file).catch(async ()=>{
+        // fallback cho định dạng createImageBitmap không hỗ trợ (vd HEIC trên vài trình duyệt)
+        const url = URL.createObjectURL(file);
+        const img = new Image();
+        await new Promise((res,rej)=>{ img.onload=res; img.onerror=rej; img.src=url; });
+        return img;
+      });
+      const iw = bitmap.width || bitmap.naturalWidth;
+      const ih = bitmap.height || bitmap.naturalHeight;
+      // scale sao cho chiều rộng khớp target px/mm, giữ nguyên tỉ lệ ảnh gốc
+      // (giả định ảnh chụp thẳng, không bị nghiêng/xoay phối cảnh)
+      const targetWidthPx = PAGE_W * RENDER_SCALE;
+      const scale = targetWidthPx / iw;
       const canvas = document.createElement('canvas');
-      canvas.width = Math.round(vp.width);
-      canvas.height = Math.round(vp.height);
+      canvas.width = Math.round(iw*scale);
+      canvas.height = Math.round(ih*scale);
       const ctx = canvas.getContext('2d');
       ctx.fillStyle = '#ffffff';
       ctx.fillRect(0,0,canvas.width,canvas.height);
-      await page.render({canvasContext: ctx, viewport: vp}).promise;
+      ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+      if(bitmap.close) bitmap.close();
+      return [canvas];
+    }
+  }
+
+  for(const file of files){
+    const pageCanvases = await getPageCanvases(file);
+
+    for(let pIdx=0; pIdx<pageCanvases.length; pIdx++){
+      const pNum = pIdx+1;
+      const canvas = pageCanvases[pIdx];
 
       // determine which template page this corresponds to.
       // Strategy: use running page index across all uploaded files & pages,
