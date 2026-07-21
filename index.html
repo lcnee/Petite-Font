@@ -377,8 +377,8 @@
     background:var(--blue-pale);border:1px solid var(--blue-border);border-radius:8px;
     padding:7px 9px;max-height:110px;overflow-y:auto;margin-top:8px;white-space:pre-wrap;}
 
-  .preview-text{font-size:26px;line-height:1.6;padding:14px;background:var(--blue-pale);
-    border:2px solid var(--grid-line,var(--blue-border));border-radius:12px;margin-top:9px;word-break:break-all;}
+  .preview-text{font-size:48px;line-height:1.6;padding:22px;background:var(--blue-pale);
+    border:2px solid var(--grid-line,var(--blue-border));border-radius:12px;margin-top:9px;word-break:break-all;min-height:90px;}
 
   .hint{font-size:11px;color:var(--sub);margin-top:5px;line-height:1.5;font-family:-apple-system,"Segoe UI",Roboto,Arial,sans-serif;}
   .badge{display:inline-block;font-size:10px;font-weight:700;padding:3px 9px;border-radius:99px;
@@ -467,7 +467,7 @@
     .glyph-grid{ grid-template-columns:repeat(auto-fill,minmax(58px,1fr)); gap:6px; }
 
     .editor-card{ padding:14px; max-height:92vh; overflow-y:auto; }
-    .preview-text{ font-size:20px; padding:10px; }
+    .preview-text{ font-size:32px; padding:16px; }
 
     /* Any element wider than the viewport (e.g. canvases sized in JS)
        shouldn't force horizontal scrolling of the whole page */
@@ -645,10 +645,10 @@
 
     <div class="row" style="margin-bottom:12px;">
       <label class="field"><span data-vi="Tên font" data-en="Font name">Tên font</span>
-        <input type="text" id="fontName" value="Petite Handwritten" style="width:190px;">
+        <input type="text" id="fontName" value="Petite Handwritten" style="width:190px;" oninput="invalidateBuild()">
       </label>
       <label class="field"><span data-vi="Định dạng xuất" data-en="Export format">Định dạng xuất</span>
-        <select id="fontFormat">
+        <select id="fontFormat" onchange="invalidateBuild()">
           <option value="ttf" selected data-vi="TTF (khuyên dùng — tương thích tốt nhất)" data-en="TTF (recommended — best compatibility)">TTF (khuyên dùng — tương thích tốt nhất)</option>
           <option value="otf">OTF</option>
         </select>
@@ -1484,6 +1484,7 @@ async function handleUploadedFiles(fileList){
     ));
   }
 
+  invalidateBuild();
   setTimeout(()=>{ buildGlyphReviewGrid(); setStep(3); }, 400);
 }
 
@@ -1682,6 +1683,7 @@ document.getElementById('btnReThreshold').addEventListener('click', ()=>{
   const ctx = document.getElementById('editorCanvas').getContext('2d');
   ctx.fillStyle='#fff'; ctx.fillRect(0,0,300,300);
   ctx.drawImage(tmp, 0,0,w,h, 0,0,300,300);
+  invalidateBuild();
 });
 
 document.getElementById('btnEditorClear').addEventListener('click', ()=>{
@@ -1690,6 +1692,7 @@ document.getElementById('btnEditorClear').addEventListener('click', ()=>{
   closeGlyphEditor();
   renderGlyphGrid();
   updateGlyphBadges();
+  invalidateBuild();
 });
 
 document.getElementById('btnEditorSave').addEventListener('click', ()=>{
@@ -1706,6 +1709,7 @@ document.getElementById('btnEditorSave').addEventListener('click', ()=>{
   renderGlyphGrid();
   updateGlyphBadges();
   renderQuickPreview();
+  invalidateBuild();
 });
 
 /* ============================================================
@@ -1917,6 +1921,23 @@ function buildGlyphPath(canvas, letterSpacingVal, yOffsetPx, spacingExtraVal){
   return{path,advanceWidth};
 }
 
+// Ẩn nút "Tải xuống" bất cứ khi nào có thay đổi (tên font, format, baseline,
+// sửa glyph...) SAU khi đã build — để tránh trường hợp người dùng quên bấm
+// lại "Build & preview font" và tải nhầm bản cũ (lỗi rất hay gặp).
+// Nút Download chỉ hiện lại sau khi bấm Build lần nữa.
+function invalidateBuild(){
+  STATE.pendingDownload = null;
+  const btn = document.getElementById('btnDownloadFont');
+  if(btn && btn.style.display !== 'none'){
+    btn.style.display = 'none';
+    const statusEl = document.getElementById('buildStatus');
+    if(statusEl) statusEl.textContent = t(
+      '✏️ Có thay đổi mới — bấm "Build & preview font" lại trước khi tải xuống.',
+      '✏️ Something changed — click "Build & preview font" again before downloading.'
+    );
+  }
+}
+
 function buildFont(){
   const statusEl = document.getElementById('buildStatus');
   statusEl.textContent = t('Đang trace & build font...','Tracing & building font...');
@@ -2007,7 +2028,7 @@ function buildFont(){
       // We patch the raw OTF binary to inject a minimal Private Dict with the
       // required fields (BlueValues, StdHW, StdVW) before saving. This is a
       // no-op for TrueType output since there is no CFF table to patch.
-      const arrayBuffer = fixCFFPrivateDict(rawBuffer);
+      const arrayBuffer = recalcSfntChecksums(fixCFFPrivateDict(rawBuffer));
 
       STATE.pendingDownload = {
         arrayBuffer,
@@ -2165,6 +2186,62 @@ function buildFont(){
     return newBuf.buffer;
   }
 
+  // ------------------------------------------------------------------
+  // Recompute sfnt table checksums + head.checkSumAdjustment.
+  // fixCFFPrivateDict() (and any other byte-level patch) changes table
+  // contents/lengths without updating the checksums recorded in the sfnt
+  // directory. macOS, browsers, and fontTools all ignore checksum
+  // mismatches — Windows (GDI/DirectWrite, Font Viewer, Word...) does not,
+  // and will flat-out refuse to load an otherwise well-formed font with
+  // "not a valid font file". This must run as the LAST step before saving.
+  // ------------------------------------------------------------------
+  function recalcSfntChecksums(arrayBuffer){
+    const u8 = new Uint8Array(arrayBuffer);
+    const view = new DataView(arrayBuffer);
+    const numTables = view.getUint16(4);
+
+    function calcChecksum(bytes){
+      let sum = 0;
+      const len = bytes.length;
+      const padded = len + ((4 - (len % 4)) % 4);
+      for(let i=0;i<padded;i+=4){
+        const b0=bytes[i]||0, b1=bytes[i+1]||0, b2=bytes[i+2]||0, b3=bytes[i+3]||0;
+        sum = (sum + ((b0<<24)|(b1<<16)|(b2<<8)|b3)) >>> 0;
+      }
+      return sum >>> 0;
+    }
+
+    let headOffset=-1;
+    for(let i=0;i<numTables;i++){
+      const base=12+i*16;
+      const tag=String.fromCharCode(u8[base],u8[base+1],u8[base+2],u8[base+3]);
+      if(tag==='head'){ headOffset=view.getUint32(base+8); break; }
+    }
+
+    // Step 1: per spec, head's checkSumAdjustment field is treated as zero
+    // while computing every table's own checksum (including head's).
+    if(headOffset>=0) view.setUint32(headOffset+8, 0);
+
+    // Step 2: write each table's own directory checksum entry.
+    for(let i=0;i<numTables;i++){
+      const base=12+i*16;
+      const offset=view.getUint32(base+8);
+      const length=view.getUint32(base+12);
+      view.setUint32(base+4, calcChecksum(u8.slice(offset, offset+length)));
+    }
+
+    // Step 3: only NOW compute the whole-file checksum (table checksums
+    // above are already final/part of the file) and derive the magic
+    // checkSumAdjustment value Windows validates against 0xB1B0AFBA.
+    if(headOffset>=0){
+      const wholeFileChecksum = calcChecksum(u8);
+      const adjustment = (0xB1B0AFBA - wholeFileChecksum) >>> 0;
+      view.setUint32(headOffset+8, adjustment); // does not invalidate head's own checksum above (per spec)
+    }
+
+    return arrayBuffer;
+  }
+
   processChunk();
 }
 
@@ -2288,6 +2365,7 @@ document.getElementById('baselineSlider').addEventListener('input', e=>{
   STATE.baselinePct = parseInt(e.target.value)/100;
   document.getElementById('baselineVal').textContent = e.target.value+'%';
   updateBaselinePreview();
+  invalidateBuild();
 });
 document.getElementById('baselineGlyphPicker').addEventListener('change', updateBaselinePreview);
 
@@ -2314,6 +2392,7 @@ document.getElementById('btnBatchThreshold').addEventListener('click', ()=>{
     count++;
   });
   buildGlyphReviewGrid();
+  invalidateBuild();
   alert(t(`✅ Đã re-threshold ${count} ký tự với giá trị ${newThresh}.`, `✅ Re-thresholded ${count} character(s) with value ${newThresh}.`));
 });
 
