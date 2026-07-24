@@ -2134,16 +2134,27 @@ function buildFont(){
 
     // Minimal valid CFF Private Dict (10 bytes, fonttools-validated)
     const PRIV=new Uint8Array([6,7,189,10,209,11,139,20,139,21]);
-    const newPrivSize=PRIV.length; // 10
+    const rawPrivSize=PRIV.length; // 10 — this is the actual CFF table content added
 
     // The offset operand already points to cffLen (= end of CFF table).
     // We append PRIV there — offset stays the same, only size changes.
     const cffEndInFile=cffOffset+cffLen;
 
-    // Build new file: insert PRIV right at end of CFF table data
+    // OpenType/sfnt requires every table to start at a 4-byte-aligned file
+    // offset. Tables are padded with zero bytes so the NEXT table's offset
+    // stays aligned; the sfnt directory records the table's real (unpadded)
+    // length. rawPrivSize=10 is not a multiple of 4, so without padding the
+    // insertion shifts every following table off-alignment. macOS, browsers,
+    // and fontTools don't check this — Windows does, and silently rejects
+    // the font ("not a valid font file") without explaining why.
+    const padBytes = (4 - (rawPrivSize % 4)) % 4; // 10 -> 2 zero bytes -> 12 total
+    const newPrivSize = rawPrivSize + padBytes;   // total bytes physically inserted
+
+    // Build new file: insert PRIV (+ zero padding) right at end of CFF table data
     const newBuf=new Uint8Array(arrayBuffer.byteLength+newPrivSize);
     newBuf.set(u8.slice(0, cffEndInFile), 0);
     newBuf.set(PRIV, cffEndInFile);
+    // padBytes are already zero (Uint8Array default-initializes to 0)
     if(cffEndInFile < arrayBuffer.byteLength){
       newBuf.set(u8.slice(cffEndInFile), cffEndInFile+newPrivSize);
     }
@@ -2164,16 +2175,20 @@ function buildFont(){
 
     if(ops2.length>=2){
       const szOp=ops2[ops2.length-2];
-      // Patch size: value 10 fits in 1-byte CFF encoding (10+139=149)
-      if(szOp.len===1)       newBuf[szOp.pos]=newPrivSize+139;
-      else if(szOp.len===3){ newBuf[szOp.pos]=28;newBuf[szOp.pos+1]=(newPrivSize>>8)&0xff;newBuf[szOp.pos+2]=newPrivSize&0xff; }
-      else if(szOp.len===5)  newView.setInt32(szOp.pos+1, newPrivSize);
+      // Patch size: value 10 (actual Private DICT content, excludes padding)
+      if(szOp.len===1)       newBuf[szOp.pos]=rawPrivSize+139;
+      else if(szOp.len===3){ newBuf[szOp.pos]=28;newBuf[szOp.pos+1]=(rawPrivSize>>8)&0xff;newBuf[szOp.pos+2]=rawPrivSize&0xff; }
+      else if(szOp.len===5)  newView.setInt32(szOp.pos+1, rawPrivSize);
     }
 
-    // Update CFF table length in sfnt directory
-    newView.setUint32(cffDirBase+12, cffLen+newPrivSize);
+    // Update CFF table length in sfnt directory. Per spec this is the table's
+    // actual content length — the zero-padding bytes that follow (to keep
+    // the NEXT table 4-byte aligned) are not counted here.
+    newView.setUint32(cffDirBase+12, cffLen+rawPrivSize);
 
-    // Shift sfnt offsets for any tables that appear after CFF in the file
+    // Shift sfnt offsets for any tables that appear after CFF in the file.
+    // Uses newPrivSize (content + padding) since that's the actual number
+    // of bytes physically inserted into the file.
     if(cffEndInFile < arrayBuffer.byteLength){
       for(let i=0;i<numTables;i++){
         const base=12+i*16;
